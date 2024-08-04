@@ -35,7 +35,7 @@ def open_url(url, num_attempts=10, verbose=False, cache_dir=None):
     if len(cache_files) == 1:
         f_name = cache_files[0]
         return open(f_name, 'rb')
-    
+
     with requests.Session() as session:
         if verbose:
             print("Downloading ", url, flush=True)
@@ -70,7 +70,7 @@ def open_url(url, num_attempts=10, verbose=False, cache_dir=None):
                     raise
                 if verbose:
                     print('.')
-        
+
     safe_name = re.sub(r"[^0-9a-zA-Z-._]", "_", url_name)
     cache_file = os.path.join(cache_dir, url_md5 + "_" + safe_name)
     temp_file = os.path.join(cache_dir, "tmp_" + uuid.uuid4().hex + "_" + url_md5 + "_" + safe_name)
@@ -82,27 +82,47 @@ def open_url(url, num_attempts=10, verbose=False, cache_dir=None):
     return io.BytesIO(url_data)
 
 # load the feature extractor either from cache or the specified URL
-def get_feature_detector(detector_url, device):
+def get_feature_detector_old(detector_url, device):
     key = (detector_url, device)
     if key not in _feature_detector_cache:
         with open_url(detector_url, verbose=True) as f:
             _feature_detector_cache[key] = torch.jit.load(f).eval().to(device)
     return _feature_detector_cache[key]
 
+# fix by Samuele Ruffino (https://github.com/samueleruffino99)
+def get_feature_detector_new(detector_url: str, device='cuda'):
+    """Load the I3D model from PyTorch Hub."""
+    key = (detector_url, device)
+    if key not in _feature_detector_cache:
+        with open_url(detector_url, verbose=False) as f:
+            detector = torch.jit.load(f).eval().to(device)
+        _feature_detector_cache[key] = detector
+    return _feature_detector_cache[key]
+
+def load_i3d(device='cuda'):
+  """Load the I3D model from PyTorch Hub."""
+  detector_url = 'https://www.dropbox.com/s/ge9e5ujwgetktms/i3d_torchscript.pt?dl=1'
+  detector_kwargs = dict(rescale=False, resize=False, return_features=True) # Return raw features before the softmax layer.
+  with open_url(detector_url, verbose=False) as f:
+    detector = torch.jit.load(f).eval().to(device)
+  return detector
 
 """
 This function is used to first extract feature representation vectors of the videos using a pretrained model
 Then the mean and covariance of the representation vectors are calculated and returned
 """
-def compute_feature_stats(data, detector_url, detector_kwargs, batch_size, max_items, device):
+def compute_feature_stats(data, detector_url, detector_kwargs, batch_size, max_items, device, old: bool):
     # if wanted reduce the number of elements used for calculating the FVD
     num_items = len(data)
     if max_items:
         num_items = min(num_items, max_items)
     data = data[:num_items]
-    
-    # load the pretrained feature extraction modeö
-    detector = get_feature_detector(detector_url, device=device)
+
+    # load the pretrained feature extraction model
+    if old:
+      detector = get_feature_detector_old(detector_url, device=device)
+    else:
+      detector = load_i3d()
 
     dataset = TensorDataset(data)
     loader = DataLoader(dataset, batch_size=batch_size)
@@ -134,14 +154,14 @@ This function calculates the Frechet Video Distance of two tensors representing 
 The input tensors should have shape num_videos x channels x num_frames x width x height
 As the calculation of frechet video distance can be expensive max_items can be defined to estimate FVD on a subset
 """
-def compute_fvd(y_true: torch.Tensor, y_pred: torch.Tensor, max_items: int, device: torch.device, batch_size: int):
+def compute_fvd(y_true: torch.Tensor, y_pred: torch.Tensor, max_items: int, device: torch.device, batch_size: int, old: bool):
     # URL from StyleGAN-V repository!
     detector_url = 'https://www.dropbox.com/s/ge9e5ujwgetktms/i3d_torchscript.pt?dl=1'
     detector_kwargs = dict(rescale=True, resize=True, return_features=True) # Return raw features before the softmax layer.
 
     # calculate the mean and covariance matrix of the representation vectors for ground truth and predicted videos
-    mu_true, sigma_true = compute_feature_stats(y_true, detector_url, detector_kwargs, batch_size, max_items, device)
-    mu_pred, sigma_pred = compute_feature_stats(y_pred, detector_url, detector_kwargs, batch_size, max_items, device)
+    mu_true, sigma_true = compute_feature_stats(y_true, detector_url, detector_kwargs, batch_size, max_items, device, old)
+    mu_pred, sigma_pred = compute_feature_stats(y_pred, detector_url, detector_kwargs, batch_size, max_items, device, old)
 
     # FVD is calculated as the mahalanobis distance between the representation vector statistics
     m = np.square(mu_pred - mu_true).sum()
